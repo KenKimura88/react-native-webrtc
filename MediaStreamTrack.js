@@ -91,7 +91,7 @@ class MediaStreamTrack extends EventTarget(MEDIA_STREAM_TRACK_EVENTS) {
   }
 
   clone() {
-    throw new Error('Not implemented.');
+    return new MediaStreamTrack(this);
   }
 
   getCapabilities() {
