@@ -24,6 +24,8 @@
 
 @implementation WebRTCModule
 
+@synthesize bridge = _bridge;
+
 + (BOOL)requiresMainQueueSetup
 {
     return NO;
@@ -91,6 +93,21 @@
     }
   }
   return stream;
+}
+
+- (RTCMediaStreamTrack*)trackForId:(NSString*)trackId
+{
+  RTCMediaStreamTrack *track = _localTracks[trackId];
+  if (!track) {
+    for (NSNumber *peerConnectionId in _peerConnections) {
+      RTCPeerConnection *peerConnection = _peerConnections[peerConnectionId];
+      track = peerConnection.remoteTracks[trackId];
+      if (track) {
+        break;
+      }
+    }
+  }
+  return track;
 }
 
 RCT_EXPORT_MODULE();
