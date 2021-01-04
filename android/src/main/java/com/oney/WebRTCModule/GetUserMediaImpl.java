@@ -109,6 +109,36 @@ class GetUserMediaImpl {
         return track;
     }
 
+    private VideoTrack createVideoTrack(ReadableMap constraints) {
+        ReadableMap videoConstraintsMap = constraints.getMap("video");
+
+        Log.d(TAG, "getUserMedia(video): " + videoConstraintsMap);
+
+        VideoCaptureController videoCaptureController
+            = new VideoCaptureController(cameraEnumerator, videoConstraintsMap);
+        VideoCapturer videoCapturer = videoCaptureController.getVideoCapturer();
+        if (videoCapturer == null) {
+            return null;
+        }
+
+        PeerConnectionFactory pcFactory = webRTCModule.mFactory;
+        EglBase.Context eglContext = EglUtils.getRootEglBaseContext();
+        SurfaceTextureHelper surfaceTextureHelper =
+            SurfaceTextureHelper.create("CaptureThread", eglContext);
+        VideoSource videoSource = pcFactory.createVideoSource(videoCapturer.isScreencast());
+        videoCapturer.initialize(surfaceTextureHelper, reactContext, videoSource.getCapturerObserver());
+
+        String id = UUID.randomUUID().toString();
+        VideoTrack track = pcFactory.createVideoTrack(id, videoSource);
+
+        track.setEnabled(true);
+        videoCaptureController.startCapture();
+
+        tracks.put(id, new TrackPrivate(track, videoSource, videoCaptureController));
+
+        return track;
+    }
+
     ReadableArray enumerateDevices() {
         WritableArray array = Arguments.createArray();
         String[] devices = cameraEnumerator.getDeviceNames();
@@ -380,7 +410,7 @@ class GetUserMediaImpl {
          * The {@code VideoCapturer} from which {@link #mediaSource} was created
          * if {@link #track} is a {@link VideoTrack}.
          */
-        public final AbstractVideoCaptureController videoCaptureController;
+        public final VideoCaptureController videoCaptureController;
 
         /**
          * Whether this object has been disposed or not.

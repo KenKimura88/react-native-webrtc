@@ -1,5 +1,16 @@
 package com.oney.WebRTCModule;
 
+import java.io.UnsupportedEncodingException;
+import java.lang.ref.SoftReference;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import androidx.annotation.Nullable;
 import android.util.Base64;
 import android.util.Log;
 import android.util.SparseArray;
@@ -8,6 +19,7 @@ import androidx.annotation.Nullable;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Promise;
+import com.facebook.react.bridge.Callback;
 import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
@@ -19,6 +31,9 @@ import org.webrtc.MediaStream;
 import org.webrtc.MediaStreamTrack;
 import org.webrtc.PeerConnection;
 import org.webrtc.RtpReceiver;
+import org.webrtc.RtpTransceiver;
+import org.webrtc.StatsObserver;
+import org.webrtc.StatsReport;
 import org.webrtc.VideoTrack;
 
 import java.io.UnsupportedEncodingException;
@@ -40,12 +55,23 @@ class PeerConnectionObserver implements PeerConnection.Observer {
     final List<MediaStream> localStreams;
     final Map<String, MediaStream> remoteStreams;
     final Map<String, MediaStreamTrack> remoteTracks;
-    private final VideoTrackAdapter videoTrackAdapters;
+    final boolean isUnifiedPlan;
+    final VideoTrackAdapter videoTrackAdapters;
     private final WebRTCModule webRTCModule;
 
-    PeerConnectionObserver(WebRTCModule webRTCModule, int id) {
+    /**
+     * The <tt>StringBuilder</tt> cache utilized by {@link #statsToJSON} in
+     * order to minimize the number of allocations of <tt>StringBuilder</tt>
+     * instances and, more importantly, the allocations of its <tt>char</tt>
+     * buffer in an attempt to improve performance.
+     */
+    private SoftReference<StringBuilder> statsToJSONStringBuilder
+        = new SoftReference<>(null);
+
+    PeerConnectionObserver(WebRTCModule webRTCModule, int id, boolean isUnifiedPlan) {
         this.webRTCModule = webRTCModule;
         this.id = id;
+        this.isUnifiedPlan = isUnifiedPlan;
         this.localStreams = new ArrayList<MediaStream>();
         this.remoteStreams = new HashMap<String, MediaStream>();
         this.remoteTracks = new HashMap<String, MediaStreamTrack>();
@@ -88,6 +114,36 @@ class PeerConnectionObserver implements PeerConnection.Observer {
 
         return localStreams.remove(localStream);
     }
+
+    String addTransceiver(MediaStreamTrack.MediaType mediaType, RtpTransceiver.RtpTransceiverInit init) {
+        if (peerConnection == null) {
+            throw new Error("Impossible");
+        }
+        RtpTransceiver transceiver = peerConnection.addTransceiver(mediaType, init);
+        return this.resolveTransceiverId(transceiver);
+    }
+
+    String addTransceiver(MediaStreamTrack track, RtpTransceiver.RtpTransceiverInit init) {
+        if (peerConnection == null) {
+            throw new Error("Impossible");
+        }
+        RtpTransceiver transceiver = peerConnection.addTransceiver(track, init);
+        return this.resolveTransceiverId(transceiver);
+    }
+
+    String resolveTransceiverId(RtpTransceiver transceiver) {
+        return transceiver.getSender().id();
+    }
+
+    RtpTransceiver getTransceiver(String id) {
+        for(RtpTransceiver transceiver: this.peerConnection.getTransceivers()) {
+            if (transceiver.getSender().id().equals(id)) {
+                return transceiver;
+            }
+        }
+        throw new Error("Unable to find transceiver");
+    }
+
 
     PeerConnection getPeerConnection() {
         return peerConnection;
@@ -197,10 +253,78 @@ class PeerConnectionObserver implements PeerConnection.Observer {
         }
     }
 
-    void getStats(Promise promise) {
-        peerConnection.getStats(rtcStatsReport -> {
-            promise.resolve(StringUtils.statsToJSON(rtcStatsReport));
-        });
+    @SuppressWarnings("deprecation") // TODO(saghul): getStats is deprecated.
+    void getStats(String trackId, final Callback cb) {
+        MediaStreamTrack track = null;
+        if (trackId == null
+                || trackId.isEmpty()
+                || (track = webRTCModule.getLocalTrack(trackId)) != null
+                || (track = remoteTracks.get(trackId)) != null) {
+            peerConnection.getStats(
+                reports -> cb.invoke(true, statsToJSON(reports)),
+                    track);
+        } else {
+            Log.e(TAG, "peerConnectionGetStats() MediaStreamTrack not found for id: " + trackId);
+            cb.invoke(false, "Track not found");
+        }
+    }
+
+    /**
+     * Constructs a JSON <tt>String</tt> representation of a specific array of
+     * <tt>StatsReport</tt>s (produced by {@link PeerConnection#getStats}).
+     * <p>
+     * On Android it is faster to (1) construct a single JSON <tt>String</tt>
+     * representation of an array of <tt>StatsReport</tt>s and (2) have it pass
+     * through the React Native bridge rather than the array of
+     * <tt>StatsReport</tt>s.
+     *
+     * @param reports the array of <tt>StatsReport</tt>s to represent in JSON
+     * format
+     * @return a <tt>String</tt> which represents the specified <tt>reports</tt>
+     * in JSON format
+     */
+    private String statsToJSON(StatsReport[] reports) {
+        // If possible, reuse a single StringBuilder instance across multiple
+        // getStats method calls in order to reduce the total number of
+        // allocations.
+        StringBuilder s = statsToJSONStringBuilder.get();
+        if (s == null) {
+            s = new StringBuilder();
+            statsToJSONStringBuilder = new SoftReference(s);
+        }
+
+        s.append('[');
+        final int reportCount = reports.length;
+        for (int i = 0; i < reportCount; ++i) {
+            StatsReport report = reports[i];
+            if (i != 0) {
+                s.append(',');
+            }
+            s.append("{\"id\":\"").append(report.id)
+                .append("\",\"type\":\"").append(report.type)
+                .append("\",\"timestamp\":").append(report.timestamp)
+                .append(",\"values\":[");
+            StatsReport.Value[] values = report.values;
+            final int valueCount = values.length;
+            for (int j = 0; j < valueCount; ++j) {
+                StatsReport.Value v = values[j];
+                if (j != 0) {
+                    s.append(',');
+                }
+                s.append("{\"").append(v.name).append("\":\"").append(v.value)
+                    .append("\"}");
+            }
+            s.append("]}");
+        }
+        s.append("]");
+
+        String r = s.toString();
+        // Prepare the StringBuilder instance for reuse (in order to reduce the
+        // total number of allocations performed during multiple getStats method
+        // calls).
+        s.setLength(0);
+
+        return r;
     }
 
     @Override
@@ -402,6 +526,15 @@ class PeerConnectionObserver implements PeerConnection.Observer {
     @Override
     public void onAddTrack(final RtpReceiver receiver, final MediaStream[] mediaStreams) {
         Log.d(TAG, "onAddTrack");
+        if(isUnifiedPlan){
+            MediaStreamTrack track = receiver.track();
+            if(track != null){
+                if(track.kind().equals(MediaStreamTrack.VIDEO_TRACK_KIND)){
+                    videoTrackAdapters.addAdapter(UUID.randomUUID().toString(), (VideoTrack) track);
+                }
+                remoteTracks.put(track.id(), track);
+            }
+        }
     }
 
     @Nullable
