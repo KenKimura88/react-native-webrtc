@@ -125,6 +125,12 @@ class GetUserMediaImpl {
         EglBase.Context eglContext = EglUtils.getRootEglBaseContext();
         SurfaceTextureHelper surfaceTextureHelper =
             SurfaceTextureHelper.create("CaptureThread", eglContext);
+
+        if (surfaceTextureHelper == null) {
+            Log.d(TAG, "Error creating SurfaceTextureHelper");
+            return null;
+        }
+
         VideoSource videoSource = pcFactory.createVideoSource(videoCapturer.isScreencast());
         videoCapturer.initialize(surfaceTextureHelper, reactContext, videoSource.getCapturerObserver());
 
@@ -176,6 +182,17 @@ class GetUserMediaImpl {
         TrackPrivate private_ = tracks.get(id);
 
         return private_ == null ? null : private_.track;
+    }
+
+    MediaStreamTrack getTrackByType(String type) {
+        for (String key : tracks.keySet()){
+            TrackPrivate private_ = tracks.get(key);
+
+            if(private_.track.kind().equalsIgnoreCase(type)){
+                return private_.track;
+            }
+        }
+        return null;
     }
 
     /**
